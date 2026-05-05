@@ -5,6 +5,7 @@ on:
     branches: [master]
     paths:
       - 'Dockerfile'
+      - 'Dockerfile.base'
       - 'requirements.txt'
       - 'web-demos/**'
       - 'VERSION'
@@ -15,6 +16,10 @@ on:
         description: 'Base version override (e.g., 0.1.0). Leave empty to auto-detect from VERSION.'
         required: false
         default: 'v20241010'
+      rebuild_base:
+        description: 'Force rebuild the base (models) image?'
+        type: boolean
+        default: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -26,8 +31,60 @@ permissions:
   packages: write
 
 jobs:
+  check-base:
+    runs-on: ubuntu-latest
+    outputs:
+      base_changed: ${{ steps.check.outputs.changed }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check if base needs rebuild
+        id: check
+        run: |
+          if [[ "${{ github.event.inputs.rebuild_base }}" == "true" ]]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Manual rebuild requested"
+          elif git diff --name-only HEAD~1 HEAD | grep -q "Dockerfile.base"; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+            echo "Dockerfile.base changed"
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+            echo "Dockerfile.base not changed, skipping base build"
+          fi
+
+  build-base:
+    runs-on: ubuntu-latest
+    needs: check-base
+    if: needs.check-base.outputs.base_changed == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.base
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:base
+
   determine-version:
     runs-on: ubuntu-latest
+    needs: [check-base, build-base]
+    if: always() && !failure() && !cancelled()
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -37,7 +94,6 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          # Step 1: Determine base version
           if [[ -n "${{ github.event.inputs.version }}" ]]; then
             BASE_VERSION="${{ github.event.inputs.version }}"
             echo "Using manually provided version: $BASE_VERSION"
@@ -51,13 +107,7 @@ jobs:
             exit 1
           fi
 
-          # Step 2: Find the highest revision already pushed for this exact base version
           TAGS=$(skopeo list-tags docker://ghcr.io/${{ github.repository }} 2>/dev/null | jq -r '.Tags[]?' || echo "")
-
-          echo "All tags found:"
-          echo "$TAGS"
-
-          # Escape dots in version for safe regex matching
           ESCAPED_VERSION="${BASE_VERSION//./\\.}"
 
           HIGHEST_REV=0
@@ -65,20 +115,18 @@ jobs:
             [[ -z "$tag" ]] && continue
             if [[ $tag =~ ^${ESCAPED_VERSION}r([0-9]+)$ ]]; then
               REV=${BASH_REMATCH[1]}
-              echo "  Matched: $tag  (r$REV)"
               if [[ $REV -gt $HIGHEST_REV ]]; then
                 HIGHEST_REV=$REV
               fi
             fi
           done <<< "$TAGS"
 
-          # Step 3: Next revision = highest + 1 (per-version; restarts at r1 on new version)
           NEXT_REV=$((HIGHEST_REV + 1))
           NEW_VERSION="${BASE_VERSION}r${NEXT_REV}"
 
           echo "========================================"
           echo "Base version : $BASE_VERSION"
-          echo "Previous rev : r${HIGHEST_REV} (0 = first build for this version)"
+          echo "Previous rev : r${HIGHEST_REV}"
           echo "Next version : $NEW_VERSION"
           echo "========================================"
 
@@ -86,7 +134,8 @@ jobs:
 
   build-and-push:
     runs-on: ubuntu-latest
-    needs: determine-version
+    needs: [build-base, determine-version]
+    if: always() && !failure() && !cancelled() && needs.determine-version.result == 'success'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -94,7 +143,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GitHub Container Registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
@@ -119,7 +168,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: type=gha,mode=min
 
       - name: Summary
         run: |
