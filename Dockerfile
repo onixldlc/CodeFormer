@@ -12,7 +12,7 @@ COPY . /app
 
 RUN pip3 install --no-cache-dir "numpy<2" \
     && pip3 install --no-cache-dir -r requirements.txt \
-    && python basicsr/setup.py develop \
+    && pip3 install --no-cache-dir -e basicsr/ \
     && pip3 install --no-cache-dir "gradio==3.50.2" "jinja2==3.1.2" "starlette==0.27.0"
 
 # copy baked models + examples from base image
