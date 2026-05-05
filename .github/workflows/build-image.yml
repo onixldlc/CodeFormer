@@ -14,7 +14,7 @@ on:
       version:
         description: 'Base version override (e.g., 0.1.0). Leave empty to auto-detect from VERSION.'
         required: false
-        default: ''
+        default: 'v20241010'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
