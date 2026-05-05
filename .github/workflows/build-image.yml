@@ -2,7 +2,7 @@ name: CodeFormer Docker Image
 
 on:
   push:
-    branches: [master]
+    branches: [master, copilot/**]
     paths:
       - 'Dockerfile'
       - 'Dockerfile.base'
